@@ -1,135 +1,7 @@
-from django.shortcuts import render, get_object_or_404, redirect
-from django.http import HttpResponse, FileResponse, JsonResponse
-from .models import File, Tag, FileTag
-from .forms import UploadFileForm, SearchForm
-from hashlib import sha256
-import pdfplumber
-import textract
-import docx2txt
-import spacy
-from PIL import Image
-import pytesseract
-import os
-import uuid
-from django.views.decorators.http import require_http_methods
-from django.db.models import Count
-from collections import defaultdict
-import re  # Import for regex validation
-import json  # Import for handling JSON data
-from django.conf import settings
-
-# Configure pytesseract path for Windows
-pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-
-# Load spaCy NLP model
-nlp = spacy.load('en_core_web_sm')
-
-
-def extract_text_from_image(image_path):
-    """Extracts text from an image file using OCR."""
-    try:
-        img = Image.open(image_path)
-        extracted_text = pytesseract.image_to_string(img)
-        return extracted_text
-    except Exception as e:
-        return f"Error extracting text from image: {e}"
-
-
-def pdf_reader(file_path):
-    """Extracts text from a PDF file."""
-    try:
-        with pdfplumber.open(file_path) as pdf:
-            all_text = ""
-            for page in pdf.pages:
-                text = page.extract_text()
-                all_text += text + "\n" if text else ""
-            return all_text
-    except Exception as e:
-        return f"Error reading PDF: {e}"
-
-
-def doc_reader(file_path):
-    """Extracts text from DOC and DOCX files."""
-    try:
-        if file_path.name.endswith('.doc'):
-            text = textract.process(file_path).decode('utf-8')
-        else:
-            text = docx2txt.process(file_path)
-        return text
-    except Exception as e:
-        return f"Error reading document: {e}"
-
-
-def generate_tags(content):
-    """Generates tags from the content using NLP."""
-    try:
-        doc = nlp(content)
-        tags = {token.lemma_.lower() for token in doc if token.is_alpha and not token.is_stop}
-        return tags
-    except Exception as e:
-        print(f"Error generating tags: {e}")
-        return set()
-
-
-def rename_file_if_too_long(file_name, max_length=50):
-    """Renames the file if its name exceeds the maximum length."""
-    name, ext = os.path.splitext(file_name)
-    if len(file_name) > max_length:
-        trimmed_name = name[:max_length - len(ext) - 4] + "_" + str(uuid.uuid4())[:4] + ext
-        return trimmed_name
-    return file_name
-
-
-def save_file(file_name, file_content, tags):
-    """Saves the file and associates it with the provided tags."""
-    try:
-        file_name = rename_file_if_too_long(file_name, max_length=50)
-        content_hash = sha256(file_content.read()).hexdigest()
-        file_content.seek(0)  # Reset file pointer after reading
-        
-        # Save the file instance
-        file_instance = File(file_name=file_name, file_content=file_content, content_hash=content_hash)
-        file_instance.save()
-
-        # Debugging: Log the saved file path
-        saved_file_path = file_instance.file_content.path
-        print(f"File saved at: {saved_file_path}")  # Debugging print
-        
-        # Verify that the file exists after saving
-        if not os.path.exists(saved_file_path):
-            print(f"Error: File was saved but does not exist at path: {saved_file_path}")  # Debugging print
-            return  # Return early if file does not exist
-        
-        # Associate tags with the file
-        for tag_name in tags:
-            tag, created = Tag.objects.get_or_create(tag_name=tag_name)
-            FileTag.objects.create(file=file_instance, tag=tag)
-    except Exception as e:
-        print(f"Error saving file: {e}")
-
-
-def perform_search(query):
-    """Performs a search on files based on the provided query."""
-    search_tags = generate_tags(query)
-    file_hit_count = defaultdict(int)
-    for tag in search_tags:
-        tag_file_hits = (
-            FileTag.objects
-            .filter(tag__tag_name=tag)
-            .values_list('file', flat=True)
-            .distinct()
-        )
-        for file_hit in tag_file_hits:
-            file_hit_count[file_hit] += 1
-    sorted_file_hits = sorted(
-        file_hit_count.items(),
-        key=lambda x: x[1],
-        reverse=True
-    )
-    files = [File.objects.get(id=file_id) for file_id, _ in sorted_file_hits]
-    return files
-
-
+from .utils import *
+from django.core.files.storage import default_storage
+def mainPage(request):
+    return render(request,'fileapp/index.html')
 def upload_and_search(request):
     """Handles file uploads and search queries."""
     upload_form = UploadFileForm()
@@ -145,10 +17,30 @@ def upload_and_search(request):
                 file = request.FILES['file']
                 if file.name.endswith('.pdf'):
                     text = pdf_reader(file)
+                    pdf_path = default_storage.save("testing_file.pdf",file)
+                    if not os.path.exists(pdf_path):
+                        print(f"Error: File not found at path {pdf_path}")
+                        raise FileNotFoundError(f"Saved file not found: {pdf_path}")
+                    # Process the file using PyMuPDF
+                    try:
+                        image_paths = extract_images_from_pdf(pdf_path)
+                        for img_path in image_paths:
+                               text+=" ".join(Obj_Detect_Name(img_path))  
+                    except Exception as e:
+                        print(f"Error processing PDF: {e}")
+                        raise
+                    finally:
+                        # Clean up: Delete the file after processing
+                        default_storage.delete(pdf_path)                    
                 elif file.name.endswith(('.doc', '.docx')):
                     text = doc_reader(file)
                 elif file.name.endswith(('.jpg', 'png', 'jpeg')):
                     text = extract_text_from_image(file)
+                    if file.name.endswith('png'):
+                        file=convert_png_to_jpg(file)
+                    lists=(Obj_Detect_Name(file))
+                    for word in lists:
+                        text=text+" "+word
 
                 # Generate tags and save file
                 tags = generate_tags(text)

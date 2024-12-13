@@ -72,7 +72,7 @@ WSGI_APPLICATION = 'myproject.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.mysql',
-        'NAME': 'file_data_db',
+        'NAME': 'browser_db',
         'USER': 'remote_user',
         'PASSWORD': 'Tarun1998#',
         'HOST': '127.0.0.1',
